@@ -35,10 +35,10 @@ optimizer = torch.optim.AdamW(list(model.parameters()) + list(fusion_model.param
 Kindly cite
 
 ```
-@inproceedings{li2024fusion,
+@article{li2024speech,
   title={Speech Emotion Recognition with ASR Transcripts: A Comprehensive Study on Word Error Rate and Fusion Techniques},
   author={Li, Yuanchao and Bell, Peter and Lai, Catherine},
-  booktitle={2024 IEEE Spoken Language Technology Workshop (SLT)},
-  organization={IEEE}
+  journal={arXiv preprint arXiv:2406.08353},
+  year={2024}
 }
 ```
