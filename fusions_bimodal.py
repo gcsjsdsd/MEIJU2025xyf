@@ -12,12 +12,19 @@ class ConcatEarly(nn.Module):
     def __init__(self):
         super(ConcatEarly, self).__init__()
 
-    def forward(self, x, y):
-        return torch.cat([x, y], dim=-1)
+    def forward(self, x, y, z):
+        return torch.cat([x, y, z], dim=-1)
 
 
 """
 Cross-attention
+only works for bimodal
+you may fuse every two modalities and then concatenate all. e.g.:
+fusion1 = CrossAttention(x,y)
+fusion2 = CrossAttention(x,z)
+fusion3 = CrossAttention(y,z)
+final_fusion = torch.cat([fusion1, fusion2, fusion3], dim=-1)
+
 """
 class CrossAttention(nn.Module):
     """Cross Attention module with additional feed-forward network and residual connections."""
@@ -61,20 +68,30 @@ Adapted from https://github.com/Justin1904/TensorFusionNetworks/blob/master/mode
 class TensorFusion(nn.Module):
 
     def __init__(self):
+        """Instantiates TensorFusion Network Module."""
         super().__init__()
 
-
-    def forward(self, x, y):
+    def forward(self, modalities):
+        """
+        Forward Pass of TensorFusion.
         
-        nonfeature_size = x.shape[:-1]
+        :param modalities: An iterable of modalities to combine. 
+        """
+        if len(modalities) == 1:
+            return modalities[0]
 
-        m = torch.cat((torch.ones(*nonfeature_size, 1, device=x.device, dtype=x.dtype), x), dim=-1)
-        y = torch.cat((torch.ones(*nonfeature_size, 1, device=y.device, dtype=y.dtype), y), dim=-1)
+        mod0 = modalities[0]
+        nonfeature_size = mod0.shape[:-1]
 
-        fused = torch.einsum('...i,...j->...ij', m, y)
-        fused = fused.reshape([*nonfeature_size, -1])
-        
-        return fused
+        m = torch.cat((Variable(torch.ones(
+            *nonfeature_size, 1).type(mod0.dtype).to(mod0.device), requires_grad=False), mod0), dim=-1)
+        for mod in modalities[1:]:
+            mod = torch.cat((Variable(torch.ones(
+                *nonfeature_size, 1).type(mod.dtype).to(mod.device), requires_grad=False), mod), dim=-1)
+            fused = torch.einsum('...i,...j->...ij', m, mod)
+            m = fused.reshape([*nonfeature_size, -1])
+
+        return m
 
 
 """
@@ -82,24 +99,41 @@ NL-gate
 See section F4 of https://arxiv.org/pdf/1905.12681.pdf for details
 """
 class NLgate(torch.nn.Module):
+    """
+    Implements of Non-Local Gate-based Fusion.
 
-    def __init__(self, thw_dim=1, c_dim=768, tf_dim=1, q_linear=None, k_linear=None, v_linear=None):
+    
+    See section F4 of https://arxiv.org/pdf/1905.12681.pdf for details
+    """
+    
+    def __init__(self, thw_dim, c_dim, tf_dim, q_linear=None, k_linear=None, v_linear=None):
+        """
+        q_linear, k_linear, v_linear are none if no linear layer applied before q,k,v.
+        
+        Otherwise, a tuple of (indim,outdim) is required for each of these 3 arguments.
+        """
         super(NLgate, self).__init__()
         self.qli = None
+        if q_linear is not None:
+            self.qli = nn.Linear(q_linear[0], q_linear[1])
         self.kli = None
+        if k_linear is not None:
+            self.kli = nn.Linear(k_linear[0], k_linear[1])
         self.vli = None
+        if v_linear is not None:
+            self.vli = nn.Linear(v_linear[0], v_linear[1])
         self.thw_dim = thw_dim
         self.c_dim = c_dim
         self.tf_dim = tf_dim
         self.softmax = nn.Softmax(dim=2)
 
-    def forward(self, x, y):
+    def forward(self, x):
         """
         Apply Low-Rank TensorFusion to input.
         """
-        q = x
-        k = y
-        v = y
+        q = x[0]
+        k = x[1]
+        v = x[1]
         if self.qli is None:
             qin = q.view(-1, self.thw_dim, self.c_dim)
         else:
@@ -212,6 +246,7 @@ class MISA(nn.Module):
 
         audio_dim   = 768
         text_dim    = 768
+        vision_dim  = 768
         hidden_dim  = 768
         
         output_dim = hidden_dim
@@ -226,135 +261,85 @@ class MISA(nn.Module):
         self.recon_t.add_module('recon_t_1', nn.Linear(in_features=hidden_dim*2, out_features=hidden_dim))
         self.recon_a = nn.Sequential()
         self.recon_a.add_module('recon_a_1', nn.Linear(in_features=hidden_dim*2, out_features=hidden_dim))
+        self.recon_v = nn.Sequential()
+        self.recon_v.add_module('recon_v_1', nn.Linear(in_features=hidden_dim*2, out_features=hidden_dim))
 
         # fusion + cls
         self.fusion = nn.Sequential()
-        self.fusion.add_module('fusion_layer_1', nn.Linear(in_features=hidden_dim*4, out_features=output_dim*2))
+        self.fusion.add_module('fusion_layer_1', nn.Linear(in_features=hidden_dim*6, out_features=output_dim*3))  # 调整输入维度
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim,  nhead=24)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=1)
         
 
-    def shared_private(self, utterance_t,  utterance_a):
+    def shared_private(self, utterance_t, utterance_a, utterance_v):
 
         self.utterance_t = utterance_t
         self.utterance_a = utterance_a
+        self.utterance_v = utterance_v
 
         self.utt_shared_t = self.shared(self.utterance_t)
         self.utt_shared_a = self.shared(self.utterance_a)
+        self.utt_shared_v = self.shared(self.utterance_v)
 
         
     def reconstruct(self):
         self.utt_t = torch.cat((self.utterance_t, self.utt_shared_t), dim=1)
-        self.utt_a = torch.cat((self.utterance_a, self.utt_shared_a), dim=1)    
+        self.utt_a = torch.cat((self.utterance_a, self.utt_shared_a), dim=1)
+        self.utt_v = torch.cat((self.utterance_v, self.utt_shared_v), dim=1)
 
         self.utt_t_recon = self.recon_t(self.utt_t)
         self.utt_a_recon = self.recon_a(self.utt_a)
+        self.utt_v_recon = self.recon_v(self.utt_v)
 
     # inter loss calculation
     def get_recon_loss(self):
         loss =  MSE()(self.utt_t_recon, self.utterance_t)
         loss += MSE()(self.utt_a_recon, self.utterance_a)
+        loss += MSE()(self.utt_v_recon, self.utterance_v)
         loss = loss / 3.0
         return loss
 
     def get_diff_loss(self):
         shared_t = self.utt_shared_t
         shared_a = self.utt_shared_a
+        shared_v = self.utt_shared_v
         private_t = self.utterance_t
         private_a = self.utterance_a
+        private_v = self.utterance_v
 
         # Between private and shared
         loss =  DiffLoss()(private_t, shared_t)
         loss += DiffLoss()(private_a, shared_a)
+        loss += DiffLoss()(private_v, shared_v)
 
         # Across privates
         loss += DiffLoss()(private_a, private_t)
+        loss += DiffLoss()(private_v, private_t)
+        loss += DiffLoss()(private_v, private_a)
         return loss
 
     def get_cmd_loss(self):
-        # losses between shared states
-        loss += CMD()(self.utt_shared_t, self.utt_shared_a, 5)
+        loss = CMD()(self.utt_shared_t, self.utt_shared_a, 5)
+        loss += CMD()(self.utt_shared_v, self.utt_shared_t, 5)
+        loss += CMD()(self.utt_shared_v, self.utt_shared_a, 5)
         loss = loss/3.0
         return loss
     
-    def forward(self, text, audio):
-        utterance_audio = audio.squeeze(1) # [batch, hidden]
-        utterance_text  = text.squeeze(1)   # [batch, hidden]
+    def forward(self, text, audio, vision):
+        utterance_audio = audio.squeeze(1)
+        utterance_text  = text.squeeze(1)
+        utterance_vision = vision.squeeze(1)
 
         # shared-private encoders
-        self.shared_private(utterance_text, utterance_audio)
+        self.shared_private(utterance_text, utterance_audio, utterance_vision)
 
         # reconstruction
         self.reconstruct()
         
         # 1-LAYER TRANSFORMER FUSION
-        h = torch.stack((self.utterance_t, self.utterance_a, self.utt_shared_t, self.utt_shared_a), dim=0)
+        h = torch.stack((self.utterance_t, self.utterance_a, self.utterance_v, self.utt_shared_t, self.utt_shared_a, self.utt_shared_v), dim=0)
         h = self.transformer_encoder(h)
-        h = torch.cat((h[0], h[1], h[2], h[3]), dim=1)
+        h = torch.cat((h[0], h[1], h[2], h[3], h[4], h[5]), dim=1)
         features = self.fusion(h)
 
         return features
-
-
-"""
-Modality-gated fusion
-Adapted from "Cross-Attention is Not Enough": https://arxiv.org/abs/2305.13583
-"""
-
-class SelfAttention(nn.Module):
-    def __init__(self):
-        super(SelfAttention, self).__init__()
-        self.attn = nn.MultiheadAttention(2304, 16, batch_first=True)
-
-    def forward(self, h):
-        self_attn, _ = self.attn(h, h, h)
-        return self_attn
-    
-class ModalityGatedFusion(nn.Module):
-    def __init__(self):
-        super(ModalityGatedFusion, self).__init__()
-        self.W = nn.Parameter(torch.ones(2), requires_grad=True)
-        self.W2 = nn.Parameter(torch.ones(3), requires_grad=True)
-        self.cross_attention = CrossAttention()
-        self.self_attention = SelfAttention()
-
-    def forward(self, x, y):
-        W_prime = F.softmax(self.W, dim=0)
-        W2_prime = F.softmax(self.W2, dim=0)
-        W_x = W_prime[0]
-        W_y = W_prime[1]
-        W2_1 = W2_prime[0]
-        W2_2 = W2_prime[1]
-        W2_3 = W2_prime[2]
-        
-        if torch.argmax(W_prime) == 0:
-            x_prime = W_x * x
-            y_prime = W_y * self.cross_attention(x, y)
-        else:
-            x_prime = W_x * self.cross_attention(y, x)
-            y_prime = W_y * y
-                    
-        H = torch.cat([W2_1 * x, W2_2 * y, W2_3 * self.self_attention(torch.cat((x_prime, y_prime), dim=-1))], dim = -1)
-
-        return H
-
-
-"""
-Late fusion
-
-There is no model for late fusion as it is performed at the decision level.
-You should build two baseline models for text and audio respectively.
-And then use the following code to select the prediction.
-Our strategy is that if the predictions from text and audio are the same, then the prediction is selected.
-Otherwise, the one with higher probability is selected.
-
-Note that the following code should be removed from this .py file and attached in your training model.
-"""
-
-if np.argmax(predictions_test_t[i]) == np.argmax(predictions_test_a[i]):
-    predictions_test.append([np.argmax(predictions_test_t[i])])
-else:
-    if max(predictions_test_t[i]) > max(predictions_test_a[i]):
-        predictions_test.append([np.argmax(predictions_test_t[i])])
-    else:
-        predictions_test.append([np.argmax(predictions_test_a[i])])
