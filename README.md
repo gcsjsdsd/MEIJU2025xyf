@@ -5,7 +5,7 @@
 first, import each fusion:
 
 ```python
-from fusions_bimodal import ConcatEarly, CrossAttention, TensorFusion, NLgate, MISA, ModalityGatedFusion #import each fusion function, except late fusion
+from fusions_bimodal import ConcatEarly, CrossAttention, TensorFusion, NLgate, MISA #import each fusion function
 ```
 
 then, define a fusion_model. For example:
@@ -21,8 +21,8 @@ for epoch in range(num_epochs):
   model.train() #this is your main model
   fusion_model.train() #this is the fusion model
 
-  for text, audio, labels in train_loader:
-      inputs = fusion_model(text.to(device), audio.to(device)) #fuse the audio and text features after loading them
+  for text, audio, vision, labels in train_loader:
+      inputs = fusion_model(text.to(device), audio.to(device), vision.to(device)) #fuse the audio, text, and vision features after loading them
 ```
 do not forget to do the same process in dev and test.
 
