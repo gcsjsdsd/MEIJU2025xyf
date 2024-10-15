@@ -1,11 +1,11 @@
 # MEIJU2025xyf
 
-## How to use ```fusions_bimodal.py```
+## How to use ```fusions_trimodal.py```
 
 first, import each fusion:
 
 ```python
-from fusions_bimodal import ConcatEarly, CrossAttention, TensorFusion, NLgate, MISA #import each fusion function
+from fusions_trimodal import ConcatEarly, CrossAttention, TensorFusion, NLgate, MISA #import each fusion function
 ```
 
 then, define a fusion_model. For example:
